@@ -74,7 +74,7 @@ Output can be tuned with the following options:
     Use ``X`` instead of ``\n`` to split records (can be one or more characters)
 
 ``--field-sep=X``
-    Use ``X`` instead of `` `` to split fields (can be one or more characters)
+    Use ``X`` instead of ` ` to split fields (can be one or more characters)
 
 ``--print0``
     Alias for ``--record-sep='\0'``.
@@ -141,3 +141,29 @@ The ``--show-default`` helper can be used with a full command line:
 
     $ estatus --config ~/.config/estatus/estatusrc --record-sep=';\n' --show-default=record-sep
     ;\n
+
+
+Roadmap
+=======
+
+Future goals include:
+
+Incremental change detection
+    In order to only detect new changes, users should be allowed to save the current state of missing/orphan/modified files.
+
+    Following runs would use that saved state as an override to gentoo defaults.
+
+
+Automatically detect Portage defaults
+    Instead of hardcoding the path to /var/db/pkg, retrieve it dynamically from portage configuration.
+
+
+Provide built-in output formats
+    Output could also be provided as, for instance, a single JSON or XML document
+
+Export bindings for various languages
+    We should export bindings for external languages. This could include:
+
+    - A C-style library, for maximum interoperability;
+    - A Rust library, as long as this project is built with Rust;
+    - Python bindings, since that language is heavily used in Gentoo.
