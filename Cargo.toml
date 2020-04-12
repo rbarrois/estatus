@@ -1,0 +1,10 @@
+[package]
+name = "estatus"
+version = "0.1.0"
+authors = [
+    "Raphaël Barrois <raphael.barrois+estatus@polytechnique.org>",
+]
+edition = "2018"
+
+[dependencies]
+md-5 = "^0.8"
