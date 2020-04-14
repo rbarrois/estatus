@@ -1,16 +1,15 @@
 use std::collections;
-use std::error;
-use std::fmt;
 use std::fs;
 use std::os::unix::fs::FileTypeExt;
-use std::io::BufRead;
 use std::io;
-use std::num;
 use std::path;
 use std::time;
+use std::fmt;
+use std::error;
 
 use md5::{Md5, Digest};
 
+mod vardbapi;
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum FileType {
@@ -62,63 +61,13 @@ pub struct ResultItem {
     pub status: FileStatus,
 }
 
+
 type MD5Hash = [u8; 16];
-
-#[derive(Eq, PartialEq, Debug)]
-enum FileHash {
-    MD5(MD5Hash),
-}
-
-type LowResSystemTime = u64;
-
-#[derive(Eq, PartialEq, Debug)]
-struct FileMetadata {
-    ftype: FileType,
-    mtime: LowResSystemTime,
-    hash: FileHash,
-}
-
-
-type Expectations = collections::HashMap<path::PathBuf, FileMetadata>;
 type SearchPaths = Vec<path::PathBuf>;
 pub type ResultSet = collections::HashMap<path::PathBuf, ResultItem>;
 
 
-#[derive(Debug)]
-enum DigestParseError {
-    UnknownDigest,
-    InvalidLength,
-    Parse(num::ParseIntError),
-}
-
-impl fmt::Display for DigestParseError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            DigestParseError::UnknownDigest => write!(f, "Invalid digest type"),
-            DigestParseError::InvalidLength => write!(f, "Digest is too short"),
-            DigestParseError::Parse(ref e) => e.fmt(f),
-        }
-    }
-}
-
-impl error::Error for DigestParseError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        match *self {
-            DigestParseError::UnknownDigest => None,
-            DigestParseError::InvalidLength => None,
-            DigestParseError::Parse(ref e) => Some(e),
-        }
-    }
-}
-
-impl From<num::ParseIntError> for DigestParseError {
-    fn from(err: num::ParseIntError) -> DigestParseError {
-        DigestParseError::Parse(err)
-    }
-}
-
-
-fn compute_md5(path: &path::PathBuf) -> io::Result<MD5Hash> {
+fn compute_md5(path: &path::Path) -> io::Result<MD5Hash> {
     let mut hasher = Md5::new();
     let mut file = fs::File::open(path)?;
     io::copy(&mut file, &mut hasher)?;
@@ -126,106 +75,33 @@ fn compute_md5(path: &path::PathBuf) -> io::Result<MD5Hash> {
     Ok(digest)
 }
 
-fn changed_hash(path: &path::PathBuf, hash: &FileHash) -> io::Result<bool> {
+fn changed_hash(path: &path::Path, hash: &vardbapi::FileHash) -> Result<bool, Error> {
     match hash {
-        FileHash::MD5(expected_md5) => {
-            let actual = compute_md5(&path)?;
+        vardbapi::FileHash::MD5(expected_md5) => {
+            let actual = compute_md5(&path).map_err(|e| Error::FileUnreadable { path: path.into(), source: e })?;
             Ok(expected_md5 != &actual)
         }
     }
 }
 
 
-/// Return an iterator over folders in a given folder.
-fn list_dirs(path: &path::PathBuf) -> io::Result<impl Iterator<Item=path::PathBuf>> {
-    let entries = fs::read_dir(path)?;
-    Ok(entries.filter_map(
-            |result| result
-            .ok()
-            .and_then(|entry|
-                      entry.metadata().ok()
-                      .and_then(|meta| if meta.is_dir() { Some(entry.path()) } else { None })
-                      )
-            ))
-}
 
-fn parse_hash(text: &str) -> Result<FileHash, DigestParseError> {
-    if text.len() == 32 {
-        // MD5 hash
-        Ok(FileHash::MD5([
-            u8::from_str_radix(&text[0..2], 16)?,
-            u8::from_str_radix(&text[2..4], 16)?,
-            u8::from_str_radix(&text[4..6], 16)?,
-            u8::from_str_radix(&text[6..8], 16)?,
-            u8::from_str_radix(&text[8..10], 16)?,
-            u8::from_str_radix(&text[10..12], 16)?,
-            u8::from_str_radix(&text[12..14], 16)?,
-            u8::from_str_radix(&text[14..16], 16)?,
-            u8::from_str_radix(&text[16..18], 16)?,
-            u8::from_str_radix(&text[18..20], 16)?,
-            u8::from_str_radix(&text[20..22], 16)?,
-            u8::from_str_radix(&text[22..24], 16)?,
-            u8::from_str_radix(&text[24..26], 16)?,
-            u8::from_str_radix(&text[26..28], 16)?,
-            u8::from_str_radix(&text[28..30], 16)?,
-            u8::from_str_radix(&text[30..32], 16)?,
-        ]))
-    } else {
-        Err(DigestParseError::InvalidLength)
-    }
-}
-
-fn parse_vdb(vdb_root: &path::PathBuf, bases: &SearchPaths) -> io::Result<Expectations> {
-    let mut expectations = Expectations::new();
-    for category in list_dirs(vdb_root)? {
-        for atom in list_dirs(&category)? {
-            let f = fs::File::open(atom.join("CONTENTS"))?;
-            let f = io::BufReader::new(f);
-            for line in f.lines() {
-                let line = line?;
-                // Line pattern:
-                // dir /path/to/file
-                // obj /path/to/file with empty.ext <md5-hash> <mtime>
-                if line.starts_with("obj ") {
-                    // <mtime>, <md5-hash>, obj /path/with wsp/file.ext
-                    let mut parts = line[4..].rsplitn(3, ' ');
-                    let mtime = parts.next().expect("Missing mtime!").parse().expect("Invalid mtime");
-                    let hash = parts.next().expect("Missing hash!");
-                    let path = path::PathBuf::from(parts.next().expect("Missing path!"));
-
-                    if bases.iter().any(|base| path.starts_with(base)) {
-                        expectations.entry(path)
-                            .and_modify(|_prev| panic!("File dual-owned in {}", atom.display()))
-                            .or_insert(FileMetadata {
-                                hash: parse_hash(&hash).expect("Invalid hash!"),
-                                mtime: mtime,
-                                ftype: FileType::REG,
-                            });
-                    }
-                }
-            }
-        }
-    }
-    Ok(expectations)
-}
-
-
-// XXX Note to self: pass in a callback that looks in the
-// expectations, and performs an MD5 only if mtime don't match!
-
-
-fn check_file(entry: &fs::DirEntry, expected: Option<&FileMetadata>) -> io::Result<ResultItem> {
-    let metadata = entry.metadata()?;
+fn check_file(entry: &fs::DirEntry, expected: Option<&vardbapi::FileMetadata>) -> Result<ResultItem, Error> {
+    let metadata = entry.metadata().map_err(|e| Error::FileUnreadable { path: entry.path(), source: e })?;
     let ftype = FileType::from(metadata.file_type());
-    if let Some(expected) = expected {
-        if ftype != expected.ftype {
+    let entry_mtime = metadata
+        .modified().map_err(|e| Error::FileUnreadable { path: entry.path(), source: e })?
+        .duration_since(time::UNIX_EPOCH).expect("Bad mtime").as_secs();
+
+    if let Some(vardbapi::FileMetadata::Regular { mtime, hash, .. }) = expected {
+        if ftype != FileType::REG {
             Ok(ResultItem {
                 path: entry.path(),
                 ftype: ftype,
                 status: FileStatus::Changed,
             })
-        } else if metadata.modified()?.duration_since(time::UNIX_EPOCH).expect("Bad mtime").as_secs() != expected.mtime {
-            if changed_hash(&entry.path(), &expected.hash)? {
+        } else if &entry_mtime != mtime {
+            if changed_hash(&entry.path(), &hash)? {
                 Ok(ResultItem {
                     path: entry.path(),
                     ftype: ftype,
@@ -255,11 +131,11 @@ fn check_file(entry: &fs::DirEntry, expected: Option<&FileMetadata>) -> io::Resu
 }
 
 
-fn check_dir(base: &path::PathBuf, store: &Expectations, mut output: &mut ResultSet) -> io::Result<()> {
-    let entries = fs::read_dir(base)?;
+fn check_dir(base: &path::Path, store: &vardbapi::VarDB, mut output: &mut ResultSet) -> Result<(), Error> {
+    let entries = fs::read_dir(base).map_err(|e| Error::DirUnreadable { path: base.into(), source: e })?;
     for entry in entries {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
+        let entry = entry.map_err(|e| Error::DirUnreadable { path: base.into(), source: e })?;
+        let metadata = entry.metadata().map_err(|e| Error::DirUnreadable { path: entry.path(), source: e })?;
         if metadata.is_dir() {
             check_dir(&entry.path(), store, &mut output)?;
         } else {
@@ -271,14 +147,56 @@ fn check_dir(base: &path::PathBuf, store: &Expectations, mut output: &mut Result
 }
 
 
-pub fn statuses(paths: impl IntoIterator<Item=path::PathBuf>, vdb_root: &path::PathBuf) -> io::Result<ResultSet> {
+pub fn statuses(paths: impl IntoIterator<Item=path::PathBuf>, vdb_root: &path::Path) -> Result<ResultSet, Error> {
     let paths_list: Vec<path::PathBuf> = paths.into_iter().collect();
 
-    let expectations = parse_vdb(vdb_root, &paths_list)?;
+    let expectations = vardbapi::get_vdb(vdb_root, &paths_list)
+        .map_err(|e| Error::VarDBError { source: e })?;
     let mut results = ResultSet::new();
 
     for base in paths_list.iter() {
         check_dir(base, &expectations, &mut results)?;
     }
     Ok(results)
+}
+
+#[derive(Debug)]
+pub enum Error {
+    VarDBError {
+        source: vardbapi::Error,
+    },
+    DirUnreadable {
+        path: path::PathBuf,
+        source: io::Error,
+    },
+    FileUnreadable {
+        path: path::PathBuf,
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Error::VarDBError { ref source } => {
+                write!(f, "{}", source)
+            },
+            Error::DirUnreadable { ref path, ref source } => {
+                write!(f, "{}: could not read directory: {}", path.display(), source)
+            },
+            Error::FileUnreadable { ref path, ref source } => {
+                write!(f, "{}: could not read file: {}", path.display(), source)
+            },
+        }
+    }
+}
+
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match *self {
+            Error::VarDBError { ref source, ..} => Some(source),
+            Error::DirUnreadable { ref source, ..} => Some(source),
+            Error::FileUnreadable { ref source, ..} => Some(source),
+        }
+    }
 }
