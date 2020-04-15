@@ -1,5 +1,4 @@
 use std::collections;
-use std::mem;
 use std::io::BufRead;
 use std::num;
 use std::fmt;
@@ -406,42 +405,24 @@ impl<V, E, I: Iterator<Item=Result<V, E>>> InlineErr for Result<I, E> {
 
     fn inline_err(self) -> InlinedErr<Self::Value, Self::Error, Self::Iter> {
         match self {
-            Err(e) => InlinedErr { error: Some(e), results: None, state: InlinedErrState::First },
-            Ok(i) => InlinedErr { error: None, results: Some(i), state: InlinedErrState::Second },
+            Err(e) => InlinedErr::Error(Some(e)),
+            Ok(i) => InlinedErr::Results(i),
         }
     }
 }
 
-struct InlinedErr<V, E, I: Iterator<Item=Result<V, E>>> {
-    error: Option<E>,
-    results: Option<I>,
-    state: InlinedErrState,
-}
-
-enum InlinedErrState {
-    First,
-    Second,
-    Finished,
+enum InlinedErr<V, E, I: Iterator<Item=Result<V, E>>> {
+    Error(Option<E>),
+    Results(I),
 }
 
 impl<V, E, I: Iterator<Item=Result<V, E>>> Iterator for InlinedErr<V, E, I> {
     type Item = Result<V, E>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.state {
-            InlinedErrState::First => {
-                self.state = InlinedErrState::Finished;
-                let error = mem::replace(&mut self.error, None);
-                Some(Err(error.unwrap()))
-            },
-            InlinedErrState::Second => {
-                if let Some(iter) = &mut self.results {
-                    iter.next()
-                } else {
-                    None
-                }
-            },
-            InlinedErrState::Finished => None,
+        match self {
+            InlinedErr::Error(err) => err.take().map(|e| Err(e)),
+            InlinedErr::Results(iter) => iter.next(),
         }
     }
 }
