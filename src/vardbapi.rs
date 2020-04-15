@@ -99,7 +99,7 @@ pub fn get_vdb(vdb_root: &path::Path, bases: &super::SearchPaths) -> Result<VarD
     Ok(vdb)
 }
 
-fn read_category<'a>(direntry: fs::DirEntry) -> Result<impl Iterator<Item=Result<VarDBEntry, Error>> + 'a, Error> {
+fn read_category(direntry: fs::DirEntry) -> Result<impl Iterator<Item=Result<VarDBEntry, Error>>, Error> {
     let atoms = fs::read_dir(direntry.path());
     atoms
         .map_err(|e| Error::CategoryUnreadable { path: direntry.path(), source: e })
@@ -114,7 +114,7 @@ fn read_category<'a>(direntry: fs::DirEntry) -> Result<impl Iterator<Item=Result
             }))
 }
 
-fn read_atom<'a>(direntry: fs::DirEntry) -> Result<impl Iterator<Item=Result<VarDBEntry, Error>> + 'a, Error> {
+fn read_atom(direntry: fs::DirEntry) -> Result<impl Iterator<Item=Result<VarDBEntry, Error>>, Error> {
     let fname = direntry.file_name().into_string().map_err(
         |_| Error::AtomInvalidName { path: direntry.path() } )?;
     if fname.starts_with("-MERGING-") {
