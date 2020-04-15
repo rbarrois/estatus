@@ -7,6 +7,8 @@ use std::io;
 use std::path;
 use std::fs;
 
+#[cfg(test)]
+mod tests;
 
 /**
  * Public structs and type aliases
