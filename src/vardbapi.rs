@@ -54,7 +54,7 @@ pub struct VarDBEntry {
 
 impl VarDBEntry {
     fn in_tree(&self, bases: &super::SearchPaths) -> bool {
-        bases.iter().all(|base| self.path.starts_with(base))
+        bases.iter().any(|base| self.path.starts_with(base))
     }
 }
 
