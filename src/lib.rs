@@ -48,7 +48,7 @@ impl From<fs::FileType> for FileType {
 pub enum FileStatus {
     Aligned,  // Complies with the expected hash
     Touched,  // Right type and content, wrong mtime
-    Altered,  // Right type, wrong content
+    Edited,   // Right type, wrong content
     Changed,  // Wrong type
     Absent,   // Expected file is not present on disk
     Orphan,   // File on disk, not owned by any package
@@ -93,40 +93,54 @@ fn check_file(entry: &fs::DirEntry, expected: Option<&vardbapi::FileMetadata>) -
         .modified().map_err(|e| Error::FileUnreadable { path: entry.path(), source: e })?
         .duration_since(time::UNIX_EPOCH).expect("Bad mtime").as_secs();
 
-    if let Some(vardbapi::FileMetadata::Regular { mtime, hash, .. }) = expected {
-        if ftype != FileType::REG {
-            Ok(ResultItem {
-                path: entry.path(),
-                ftype: ftype,
-                status: FileStatus::Changed,
-            })
-        } else if &entry_mtime != mtime {
-            if changed_hash(&entry.path(), &hash)? {
-                Ok(ResultItem {
-                    path: entry.path(),
-                    ftype: ftype,
-                    status: FileStatus::Altered,
-                })
+    match expected {
+        Some(vardbapi::FileMetadata::Regular { mtime, hash }) => {
+            if ftype != FileType::REG {
+                Ok(ResultItem { status: FileStatus::Changed, ftype: ftype, path: entry.path() })
+            } else if &entry_mtime != mtime {
+                if changed_hash(&entry.path(), &hash)? {
+                    Ok(ResultItem { status: FileStatus::Edited, ftype: ftype, path: entry.path() })
+                } else {
+                    Ok(ResultItem { status: FileStatus::Touched, ftype: ftype, path: entry.path() })
+                }
             } else {
-                Ok(ResultItem {
-                    path: entry.path(),
-                    ftype: ftype,
-                    status: FileStatus::Touched,
-                })
+                Ok(ResultItem { status: FileStatus::Aligned, ftype: ftype, path: entry.path() })
             }
-        } else {
-            Ok(ResultItem {
-                path: entry.path(),
-                ftype: ftype,
-                status: FileStatus::Aligned,
-            })
-        }
-    } else {
-        Ok(ResultItem {
-            path: entry.path(),
-            ftype: FileType::from(metadata.file_type()),
-            status: FileStatus::Orphan,
-        })
+        },
+        Some(vardbapi::FileMetadata::Symlink { mtime, dest }) => {
+            if ftype != FileType::LNK {
+                return Ok(ResultItem { status: FileStatus::Changed, ftype: ftype, path: entry.path() })
+            }
+            let entry_dest = entry.path().read_link()
+                .map_err(|e| Error::FileUnreadable { path: entry.path(), source: e })?;
+            if &entry_mtime != mtime || &entry_dest != dest {
+                Ok(ResultItem { status: FileStatus::Edited, ftype: ftype, path: entry.path() })
+            } else {
+                Ok(ResultItem { status: FileStatus::Aligned, ftype: ftype, path: entry.path() })
+            }
+        },
+        Some(vardbapi::FileMetadata::Directory) => {
+            if ftype == FileType::DIR {
+                Ok(ResultItem { status: FileStatus::Aligned, ftype: ftype, path: entry.path() })
+            } else {
+                Ok(ResultItem { status: FileStatus::Changed, ftype: ftype, path: entry.path() })
+            }
+        },
+        Some(vardbapi::FileMetadata::Device) => {
+            if ftype == FileType::BLK || ftype == FileType::CHR {
+                Ok(ResultItem { status: FileStatus::Aligned, ftype: ftype, path: entry.path() })
+            } else {
+                Ok(ResultItem { status: FileStatus::Changed, ftype: ftype, path: entry.path() })
+            }
+        },
+        Some(vardbapi::FileMetadata::Fifo) => {
+            if ftype == FileType::FIFO {
+                Ok(ResultItem { status: FileStatus::Aligned, ftype: ftype, path: entry.path() })
+            } else {
+                Ok(ResultItem { status: FileStatus::Changed, ftype: ftype, path: entry.path() })
+            }
+        },
+        None => Ok(ResultItem { status: FileStatus::Orphan, ftype: ftype, path: entry.path() }),
     }
 }
 
